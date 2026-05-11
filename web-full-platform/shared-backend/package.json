@@ -1,0 +1,20 @@
+{
+  "name": "shared-backend",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --prefix ../marketplace-app",
+    "dev:marketplace": "npm run dev --prefix ../marketplace-app",
+    "dev:admin": "npm run dev --prefix ../admin-app"
+  },
+  "dependencies": {
+    "axios": "^1.16.0",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "firebase-admin": "^13.9.0",
+    "multer": "^2.1.1",
+    "node-fetch": "^3.3.2",
+    "socket.io-client": "^4.8.3",
+    "zod": "^4.4.3"
+  }
+}

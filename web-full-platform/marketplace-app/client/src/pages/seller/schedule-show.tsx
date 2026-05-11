@@ -1,0 +1,1154 @@
+import { useState, useEffect, useMemo } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { useLocation } from "wouter";
+import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "@/lib/queryClient";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { ArrowLeft, Upload, X, ChevronDown, ChevronUp, Video, Loader2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth-context";
+import { useSettings } from "@/lib/settings-context";
+import { uploadShowThumbnail, uploadShowPreviewVideo } from "@/lib/upload-images";
+
+const scheduleShowSchema = z.object({
+  title: z.string().min(1, "Show title is required"),
+  scheduledAt: z.string().min(1, "Date and time is required"),
+  category: z.string().min(1, "Category is required"),
+  description: z.string().optional(),
+  thumbnail: z.string().optional(),
+  preview_videos: z.string().optional(),
+  
+  // Shipping Settings
+  freePickup: z.boolean().default(false),
+  uspsPriorityMail: z.boolean().default(true),
+  uspsGroundAdvantage: z.boolean().default(true),
+  shippingProfile: z.string().optional(),
+  shippingCoverage: z.enum(["seller_pays_all", "buyer_pays_up_to", "buyer_pays_all"]),
+  maxBuyerPays: z.string().optional(),
+  
+  // Content Settings
+  roomType: z.enum(["public", "private"]),
+  explicitContent: z.boolean().default(false),
+  
+  // Repeat Settings
+  repeatShow: z.enum(["none", "daily", "weekly", "monthly"]),
+  repeatCount: z.string().optional(),
+});
+
+type ScheduleShowFormData = z.infer<typeof scheduleShowSchema>;
+
+export default function ScheduleShow() {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const { user } = useAuth();
+  const { isFirebaseReady, fetchSettings } = useSettings();
+  const [thumbnailPreview, setThumbnailPreview] = useState<string | null>(null);
+  const [videoPreview, setVideoPreview] = useState<string | null>(null);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [uploadingVideo, setUploadingVideo] = useState(false);
+  const [domesticShipmentsExpanded, setDomesticShipmentsExpanded] = useState(false);
+  const [shippingCostsExpanded, setShippingCostsExpanded] = useState(false);
+
+  // Initialize Firebase for image uploads
+  useEffect(() => {
+    if (!isFirebaseReady) {
+      fetchSettings();
+    }
+  }, [isFirebaseReady, fetchSettings]);
+
+  // Get edit ID from URL query params
+  const editShowId = new URLSearchParams(window.location.search).get('edit');
+  const isEditMode = !!editShowId;
+
+  // Fetch show data if in edit mode
+  const { data: showData, isLoading: loadingShowData } = useQuery({
+    queryKey: ['/api/rooms', editShowId],
+    queryFn: async () => {
+      if (!editShowId) return null;
+      const response = await fetch(`/api/rooms/${editShowId}`);
+      if (!response.ok) throw new Error('Failed to fetch show');
+      return response.json();
+    },
+    enabled: isEditMode,
+  });
+
+  // Fetch real categories
+  const { data: categoriesData, isLoading: categoriesLoading } = useQuery({
+    queryKey: ['/api/categories'],
+    queryFn: async () => {
+      const response = await fetch('/api/categories?status=active&page=1&limit=100');
+      if (!response.ok) throw new Error('Failed to fetch categories');
+      return response.json();
+    },
+  });
+  
+  // Flatten categories to include subcategories
+  const categories = useMemo(() => {
+    if (!categoriesData?.categories) return [];
+    
+    const flattened: any[] = [];
+    categoriesData.categories.forEach((category: any) => {
+      // Add parent category
+      flattened.push(category);
+      
+      // Add subcategories if they exist
+      if (category.subCategories && Array.isArray(category.subCategories) && category.subCategories.length > 0) {
+        flattened.push(...category.subCategories);
+      }
+    });
+    
+    console.log('📦 Flattened categories:', flattened.map((c: any) => ({ id: c._id, name: c.name })));
+    return flattened;
+  }, [categoriesData]);
+
+  // Fetch real shipping profiles
+  const { data: shippingProfilesResponse, isLoading: loadingShippingProfiles } = useQuery<any[]>({
+    queryKey: ["external-shipping-profiles", user?.id],
+    queryFn: async () => {
+      if (!user?.id) throw new Error("User ID required");
+
+      const response = await fetch(
+        `/api/shipping/profiles/${user.id}`,
+        {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch shipping profiles: ${response.status}`);
+      }
+      return response.json();
+    },
+    enabled: !!user?.id,
+  });
+
+  const form = useForm<ScheduleShowFormData>({
+    resolver: zodResolver(scheduleShowSchema),
+    defaultValues: {
+      title: "",
+      scheduledAt: "",
+      category: "",
+      description: "",
+      freePickup: false,
+      uspsPriorityMail: true,
+      uspsGroundAdvantage: true,
+      shippingProfile: "",
+      shippingCoverage: "buyer_pays_all",
+      maxBuyerPays: "",
+      roomType: "public",
+      explicitContent: false,
+      repeatShow: "none",
+      repeatCount: "",
+    },
+  });
+
+  // Populate form when show data is loaded (edit mode)
+  // Wait for categories and shipping profiles to load before populating
+  useEffect(() => {
+    if (showData && isEditMode && !categoriesLoading && !loadingShippingProfiles) {
+      console.log('📝 Populating form with show data:', showData);
+      console.log('📦 Categories loaded:', categoriesData?.categories?.length);
+      console.log('📦 Shipping profiles loaded:', shippingProfilesResponse?.length);
+      
+      // Format date for datetime-local input (YYYY-MM-DDTHH:mm)
+      const scheduledDate = new Date(showData.date);
+      const formattedDate = scheduledDate.toISOString().slice(0, 16);
+      
+      // Get shipping settings with fallbacks
+      const shippingSettings = showData.shipping_settings || {};
+      
+      console.log('🚚 Shipping settings from API:', shippingSettings);
+      
+      // Determine shipping coverage mode using exact database field names
+      let shippingCoverage: "seller_pays_all" | "buyer_pays_up_to" | "buyer_pays_all" = "buyer_pays_all";
+      if (shippingSettings.shippingCostMode) {
+        shippingCoverage = shippingSettings.shippingCostMode;
+      } else if (shippingSettings.seller_pays) {
+        shippingCoverage = "seller_pays_all";
+      } else if (shippingSettings.reducedShippingCapAmount > 0) {
+        shippingCoverage = "buyer_pays_up_to";
+      }
+      
+      console.log('🚚 Calculated shipping coverage:', shippingCoverage);
+      
+      // Extract category ID from object or string
+      const categoryId = typeof showData.category === 'object' 
+        ? (showData.category as any)?._id || (showData.category as any)?.id || ""
+        : showData.category || "";
+      
+      console.log('📌 Category value:', { raw: showData.category, extracted: categoryId });
+      console.log('📌 Available categories:', categories.map((c: any) => ({ id: c._id, name: c.name })));
+      
+      // Check if category exists in available categories
+      const categoryExists = categories.some((c: any) => c._id === categoryId);
+      console.log('📌 Category exists in list?', categoryExists);
+
+      // Use setTimeout to ensure Select components are mounted
+      setTimeout(() => {
+        // Set individual values for better Select component support
+        form.setValue("title", showData.title || "");
+        form.setValue("scheduledAt", formattedDate);
+        form.setValue("category", categoryId);
+        console.log('📌 After setValue, form.getValues("category"):', form.getValues("category"));
+        form.setValue("description", showData.description || "");
+        // Use exact database field names
+        form.setValue("freePickup", !!shippingSettings.freePickupEnabled);
+        form.setValue("uspsPriorityMail", !!shippingSettings.priorityMailEnabled);
+        form.setValue("uspsGroundAdvantage", !!shippingSettings.groundAdvantageEnabled);
+        form.setValue("shippingProfile", shippingSettings.shippingProfile || "");
+        
+        console.log('🚚 Set shipping values:', {
+          freePickup: !!shippingSettings.freePickupEnabled,
+          uspsPriorityMail: !!shippingSettings.priorityMailEnabled,
+          uspsGroundAdvantage: !!shippingSettings.groundAdvantageEnabled,
+          shippingProfile: shippingSettings.shippingProfile
+        });
+        form.setValue("shippingCoverage", shippingCoverage);
+        form.setValue("maxBuyerPays", shippingSettings.reducedShippingCapAmount ? String(shippingSettings.reducedShippingCapAmount) : "");
+        form.setValue("roomType", showData.roomType || "public");
+        form.setValue("explicitContent", showData.explicit_content || false);
+        form.setValue("repeatShow", showData.repeat || "none");
+        form.setValue("repeatCount", showData.repeat_count ? String(showData.repeat_count) : "");
+        
+        // Preserve existing thumbnail URL if exists
+        if (showData.thumbnail) {
+          form.setValue("thumbnail", showData.thumbnail);
+          setThumbnailPreview(showData.thumbnail);
+        }
+        
+        // Preserve existing preview video URL if exists
+        if (showData.preview_videos) {
+          form.setValue("preview_videos", showData.preview_videos);
+          setVideoPreview(showData.preview_videos);
+        }
+        
+        console.log('✅ Form values set with category:', categoryId);
+      }, 100);
+    }
+  }, [showData, isEditMode, form, categoriesLoading, loadingShippingProfiles, categories, shippingProfilesResponse]);
+
+  const handleThumbnailUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setUploadingImage(true);
+      
+      // Show preview immediately
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setThumbnailPreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+
+      // Upload to Firebase Storage
+      const showId = editShowId || `show_${Date.now()}`;
+      const imageUrl = await uploadShowThumbnail(file, showId);
+      
+      form.setValue("thumbnail", imageUrl);
+      console.log('📸 Image uploaded:', imageUrl);
+      
+      toast({
+        title: "Image Uploaded",
+        description: "Thumbnail uploaded successfully!",
+      });
+    } catch (error) {
+      console.error('Error uploading image:', error);
+      toast({
+        title: "Upload Failed",
+        description: "Failed to upload image. Please try again.",
+        variant: "destructive",
+      });
+      // Clear preview on error
+      setThumbnailPreview(null);
+      form.setValue("thumbnail", "");
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  const removeThumbnail = () => {
+    setThumbnailPreview(null);
+    form.setValue("thumbnail", "");
+  };
+
+  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setUploadingVideo(true);
+      
+      // Show preview immediately
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setVideoPreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+
+      // Upload to Firebase Storage
+      const showId = editShowId || `show_${Date.now()}`;
+      const videoUrl = await uploadShowPreviewVideo(file, showId);
+      
+      form.setValue("preview_videos", videoUrl);
+      console.log('🎥 Video uploaded:', videoUrl);
+      
+      toast({
+        title: "Video Uploaded",
+        description: "Preview video uploaded successfully!",
+      });
+    } catch (error) {
+      console.error('Error uploading video:', error);
+      toast({
+        title: "Upload Failed",
+        description: "Failed to upload video. Please try again.",
+        variant: "destructive",
+      });
+      // Clear preview on error
+      setVideoPreview(null);
+      form.setValue("preview_videos", "");
+    } finally {
+      setUploadingVideo(false);
+    }
+  };
+
+  const removeVideo = () => {
+    setVideoPreview(null);
+    form.setValue("preview_videos", "");
+  };
+
+  const onSubmit = async (data: ScheduleShowFormData) => {
+    try {
+      if (!user?.id) {
+        toast({
+          title: "Authentication Required",
+          description: "Please log in to schedule a show.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Convert scheduled date to timestamp
+      const scheduledDate = new Date(data.scheduledAt);
+      const dateTimestamp = scheduledDate.getTime();
+
+      // Build shipping settings object with exact database field names
+      const reducedAmount = data.maxBuyerPays ? parseFloat(data.maxBuyerPays) : 0;
+      
+      // If reducedShippingCapAmount is set, shippingCostMode becomes buyer_pays_up_to automatically
+      let shippingCostMode = data.shippingCoverage;
+      if (reducedAmount > 0) {
+        shippingCostMode = "buyer_pays_up_to";
+      }
+      
+      const shippingSettings = {
+        priorityMailEnabled: data.uspsPriorityMail,
+        groundAdvantageEnabled: data.uspsGroundAdvantage,
+        shippingCostMode: shippingCostMode,
+        reducedShippingCapAmount: reducedAmount,
+        buyer_pays: shippingCostMode === "buyer_pays_all" || shippingCostMode === "buyer_pays_up_to",
+        seller_pays: shippingCostMode === "seller_pays_all",
+        freePickupEnabled: data.freePickup,
+        shippingProfile: data.shippingProfile || null,
+      };
+
+      // Build the room data matching the Flutter structure
+      const roomData = {
+        title: data.title,
+        roomType: data.roomType,
+        userId: user.id,
+        category: data.category,
+        activeTime: Date.now(), // Current timestamp
+        status: true,
+        repeat: data.repeatShow,
+        repeat_count: data.repeatCount ? parseInt(data.repeatCount) : 0,
+        date: dateTimestamp,
+        shipping_settings: shippingSettings,
+        explicit_content: data.explicitContent,
+        description: data.description || "",
+        thumbnail: data.thumbnail || "",
+        preview_videos: data.preview_videos || "",
+      };
+
+      if (isEditMode && editShowId) {
+        // Update existing show
+        console.log("Updating show with data:", roomData);
+
+        const response = await fetch(`/api/rooms/${editShowId}`, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(roomData),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to update show");
+        }
+
+        const result = await response.json();
+        console.log("Show updated successfully:", result);
+
+        // Invalidate cache to refresh the shows list
+        await queryClient.invalidateQueries({ queryKey: ['/api/rooms'] });
+
+        toast({
+          title: "Show Updated Successfully",
+          description: `Your show "${data.title}" has been updated.`,
+        });
+      } else {
+        // Create new show
+        console.log("Creating show with data:", roomData);
+
+        const response = await fetch("/api/rooms", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(roomData),
+        });
+
+        if (!response.ok) {
+          const errorData = await response.json();
+          throw new Error(errorData.error || "Failed to create show");
+        }
+
+        const result = await response.json();
+        console.log("Show created successfully:", result);
+
+        // Invalidate cache to refresh the shows list
+        await queryClient.invalidateQueries({ queryKey: ['/api/rooms'] });
+
+        toast({
+          title: "Show Scheduled Successfully",
+          description: `Your show "${data.title}" has been scheduled.`,
+        });
+      }
+
+      // Navigate to live shows page
+      setLocation("/live-shows");
+    } catch (error) {
+      console.error("Error creating show:", error);
+      toast({
+        title: "Failed to Schedule Show",
+        description: error instanceof Error ? error.message : "An error occurred",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const shippingCoverage = form.watch("shippingCoverage");
+  const repeatShow = form.watch("repeatShow");
+
+  const shippingProfiles = shippingProfilesResponse || [];
+
+  return (
+    <div className="h-full flex flex-col bg-background">
+      {/* Header */}
+      <div className="border-b border-border bg-background px-4 sm:px-6 py-3 sm:py-4">
+        <div className="flex items-center gap-2 sm:gap-4">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setLocation("/live-shows")}
+            data-testid="button-back"
+          >
+            <ArrowLeft className="h-5 w-5" />
+          </Button>
+          <div>
+            <h1 className="text-xl sm:text-2xl font-bold text-foreground" data-testid="text-schedule-show-title">
+              {isEditMode ? "Edit Show" : "Schedule a Show"}
+            </h1>
+            <p className="text-xs sm:text-sm text-muted-foreground">
+              {isEditMode ? "Update your show details and settings" : "Set up your live selling show with shipping and content settings"}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-auto px-4 sm:px-6 py-4 sm:py-6">
+        <div className="w-full max-w-6xl mx-auto">
+          <Form {...form}>
+            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+              
+              {/* Two Column Grid - Left: Basic Info, Right: Shipping & Settings */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* LEFT COLUMN: Basic Info & Description */}
+                <div className="space-y-4">
+                  {/* Basic Information */}
+                  <div className="space-y-3">
+                  <FormField
+                    control={form.control}
+                    name="title"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Show Title *</FormLabel>
+                        <FormControl>
+                          <Input
+                            placeholder="e.g., $100 in giveaways. $1 pre-loved Lululemon"
+                            {...field}
+                            data-testid="input-show-title"
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          Make it descriptive to tell viewers what you're selling
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="scheduledAt"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Date & Time *</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="datetime-local"
+                            {...field}
+                            data-testid="input-scheduled-at"
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          Schedule 1 week in advance for maximum bookmarks
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="category"
+                    render={({ field }) => {
+                      console.log('🎯 Category field.value:', field.value);
+                      return (
+                      <FormItem>
+                        <FormLabel>Category *</FormLabel>
+                        <Select onValueChange={field.onChange} value={field.value}>
+                          <FormControl>
+                            <SelectTrigger data-testid="select-category">
+                              <SelectValue placeholder={categoriesLoading ? "Loading categories..." : "Select a category"} />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            {categoriesLoading ? (
+                              <SelectItem value="loading" disabled>Loading...</SelectItem>
+                            ) : categoriesData?.categories && categoriesData.categories.length > 0 ? (
+                              <>
+                                {categoriesData.categories.map((category: any) => [
+                                  /* Parent Category */
+                                  <SelectItem key={category._id || category.id} value={category._id || category.id} className="font-semibold">
+                                    {category.name}
+                                  </SelectItem>,
+                                  
+                                  /* Subcategories with indentation */
+                                  ...(category.subCategories && category.subCategories.length > 0 
+                                    ? category.subCategories.map((subCategory: any) => (
+                                        <SelectItem 
+                                          key={subCategory._id || subCategory.id} 
+                                          value={subCategory._id || subCategory.id}
+                                          className="pl-6"
+                                        >
+                                          ↳ {subCategory.name}
+                                        </SelectItem>
+                                      ))
+                                    : []
+                                  )
+                                ])}
+                              </>
+                            ) : (
+                              <SelectItem value="none" disabled>No categories available</SelectItem>
+                            )}
+                          </SelectContent>
+                        </Select>
+                        <FormDescription>
+                          Helps buyers discover your show
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                      );
+                    }}
+                  />
+                  </div>
+
+                  {/* Description */}
+                  <div className="space-y-3">
+                    <FormField
+                      control={form.control}
+                      name="description"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Description</FormLabel>
+                          <FormControl>
+                            <Textarea
+                              placeholder="Add more details about what you'll be selling..."
+                              {...field}
+                              className="min-h-[120px]"
+                              data-testid="textarea-description"
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+
+                  {/* Thumbnail */}
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium">Thumbnail/Cover Photo</Label>
+                    <FormField
+                      control={form.control}
+                      name="thumbnail"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormControl>
+                            <div className="space-y-4">
+                              {thumbnailPreview ? (
+                                <div className="relative w-full max-w-[160px]">
+                                  <img
+                                    src={thumbnailPreview}
+                                    alt="Thumbnail preview"
+                                    className="w-full aspect-[9/16] object-cover rounded-lg border border-border"
+                                  />
+                                  <Button
+                                    type="button"
+                                    variant="destructive"
+                                    size="icon"
+                                    className="absolute top-2 right-2 h-7 w-7"
+                                    onClick={removeThumbnail}
+                                    data-testid="button-remove-thumbnail"
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              ) : (
+                                <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
+                                  <Upload className="h-10 w-10 text-muted-foreground mx-auto mb-2" />
+                                  <Label
+                                    htmlFor="thumbnail-upload"
+                                    className={`cursor-pointer text-sm text-primary hover:underline ${uploadingImage ? 'opacity-50 pointer-events-none' : ''}`}
+                                  >
+                                    {uploadingImage ? 'Uploading...' : 'Upload'}
+                                  </Label>
+                                  <Input
+                                    id="thumbnail-upload"
+                                    type="file"
+                                    accept="image/*,video/*"
+                                    onChange={handleThumbnailUpload}
+                                    className="hidden"
+                                    data-testid="input-thumbnail"
+                                    disabled={uploadingImage}
+                                  />
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    1080x1920px (9:16)
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+
+                  {/* Preview Video */}
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium">Preview Video</Label>
+                    <FormField
+                      control={form.control}
+                      name="preview_videos"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormControl>
+                            <div className="space-y-4">
+                              {videoPreview ? (
+                                <div className="relative w-full max-w-[160px]">
+                                  <video
+                                    src={videoPreview}
+                                    className="w-full aspect-[9/16] object-cover rounded-lg border border-border"
+                                    controls
+                                  />
+                                  <Button
+                                    type="button"
+                                    variant="destructive"
+                                    size="icon"
+                                    className="absolute top-2 right-2 h-7 w-7"
+                                    onClick={removeVideo}
+                                    data-testid="button-remove-video"
+                                  >
+                                    <X className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                              ) : (
+                                <div className="border-2 border-dashed border-border rounded-lg p-6 text-center">
+                                  <Video className="h-10 w-10 text-muted-foreground mx-auto mb-2" />
+                                  <Label
+                                    htmlFor="video-upload"
+                                    className={`cursor-pointer text-sm text-primary hover:underline ${uploadingVideo ? 'opacity-50 pointer-events-none' : ''}`}
+                                  >
+                                    {uploadingVideo ? 'Uploading...' : 'Upload'}
+                                  </Label>
+                                  <Input
+                                    id="video-upload"
+                                    type="file"
+                                    accept="video/*"
+                                    onChange={handleVideoUpload}
+                                    className="hidden"
+                                    data-testid="input-video"
+                                    disabled={uploadingVideo}
+                                  />
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    MP4, MOV, or other video formats
+                                  </p>
+                                </div>
+                              )}
+                            </div>
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                </div>
+
+                {/* RIGHT COLUMN: Shipping & Settings */}
+                <div className="space-y-4">
+                  {/* Shipping Settings */}
+                  <div className="space-y-3">
+                  {/* Shipping Profile */}
+                  <FormField
+                    control={form.control}
+                    name="shippingProfile"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Shipping Profile</FormLabel>
+                        <Select 
+                          onValueChange={field.onChange} 
+                          value={field.value}
+                          disabled={loadingShippingProfiles}
+                          data-testid="select-shipping-profile"
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select shipping profile" />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent position="popper">
+                            <SelectItem value="skip">No Shipping Profile</SelectItem>
+                            {shippingProfiles.map((profile: any) => (
+                              <SelectItem key={profile._id} value={profile._id}>
+                                {profile.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  {/* Free Pickup Toggle */}
+                  <FormField
+                    control={form.control}
+                    name="freePickup"
+                    render={({ field }) => (
+                      <FormItem className="flex flex-row items-center justify-between rounded-lg border border-border p-4">
+                        <div className="space-y-0.5">
+                          <FormLabel className="text-base">Free pickup</FormLabel>
+                        </div>
+                        <FormControl>
+                          <Switch
+                            checked={field.value}
+                            onCheckedChange={field.onChange}
+                            data-testid="switch-free-pickup"
+                          />
+                        </FormControl>
+                      </FormItem>
+                    )}
+                  />
+
+                  {/* Domestic Shipments - Expandable */}
+                  <div className="rounded-lg border border-border">
+                    <button
+                      type="button"
+                      onClick={() => setDomesticShipmentsExpanded(!domesticShipmentsExpanded)}
+                      className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
+                      data-testid="button-domestic-shipments"
+                    >
+                      <div className="text-left">
+                        <div className="font-semibold text-sm">Domestic Shipments</div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          All orders falling outside of your shipping preferences will default to USPS Ground Advantage. Eligible sellers will default to Media Mail shipping.
+                        </p>
+                      </div>
+                      {domesticShipmentsExpanded ? (
+                        <ChevronUp className="h-5 w-5 text-muted-foreground flex-shrink-0 ml-2" />
+                      ) : (
+                        <ChevronDown className="h-5 w-5 text-muted-foreground flex-shrink-0 ml-2" />
+                      )}
+                    </button>
+                    
+                    {domesticShipmentsExpanded && (
+                      <div className="p-4 pt-0 border-t border-border space-y-3">
+                        {/* USPS Priority Mail */}
+                        <FormField
+                          control={form.control}
+                          name="uspsPriorityMail"
+                          render={({ field }) => (
+                            <FormItem className="flex flex-row items-center justify-between rounded-lg border border-border p-4">
+                              <div className="space-y-0.5">
+                                <FormLabel className="text-base font-semibold">USPS Priority Mail</FormLabel>
+                                <FormDescription className="text-xs">
+                                  Arrives in 1-3 business days. Best for time-sensitive shipments.
+                                </FormDescription>
+                              </div>
+                              <FormControl>
+                                <Switch
+                                  checked={field.value}
+                                  onCheckedChange={field.onChange}
+                                  data-testid="switch-usps-priority"
+                                />
+                              </FormControl>
+                            </FormItem>
+                          )}
+                        />
+
+                        {/* USPS Ground Advantage */}
+                        <FormField
+                          control={form.control}
+                          name="uspsGroundAdvantage"
+                          render={({ field }) => (
+                            <FormItem className="flex flex-row items-center justify-between rounded-lg border border-border p-4">
+                              <div className="space-y-0.5">
+                                <FormLabel className="text-base font-semibold">USPS Ground Advantage</FormLabel>
+                                <FormDescription className="text-xs">
+                                  Best for shipping heavier items that aren't time-sensitive.
+                                </FormDescription>
+                              </div>
+                              <FormControl>
+                                <Switch
+                                  checked={field.value}
+                                  onCheckedChange={field.onChange}
+                                  data-testid="switch-usps-ground"
+                                />
+                              </FormControl>
+                            </FormItem>
+                          )}
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Shipping Costs - Expandable */}
+                  <div className="rounded-lg border border-border">
+                    <button
+                      type="button"
+                      onClick={() => setShippingCostsExpanded(!shippingCostsExpanded)}
+                      className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
+                      data-testid="button-shipping-costs"
+                    >
+                      <div className="text-left">
+                        <div className="font-semibold text-sm">Shipping Costs</div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Costs calculated based on buyer's location and shipment weight. Only applies to shipments within the contiguous U.S.
+                        </p>
+                      </div>
+                      {shippingCostsExpanded ? (
+                        <ChevronUp className="h-5 w-5 text-muted-foreground flex-shrink-0 ml-2" />
+                      ) : (
+                        <ChevronDown className="h-5 w-5 text-muted-foreground flex-shrink-0 ml-2" />
+                      )}
+                    </button>
+                    
+                    {shippingCostsExpanded && (
+                      <div className="p-4 pt-0 border-t border-border">
+                        <FormField
+                          control={form.control}
+                          name="shippingCoverage"
+                          render={({ field }) => (
+                            <FormItem className="space-y-3">
+                              <FormControl>
+                                <RadioGroup
+                                  onValueChange={field.onChange}
+                                  defaultValue={field.value}
+                                  className="flex flex-col space-y-3"
+                                >
+                                  {/* Seller pays all */}
+                                  <FormItem className="flex flex-col space-y-2 rounded-lg border border-border p-3">
+                                    <div className="flex items-start space-x-3 space-y-0">
+                                      <FormControl>
+                                        <RadioGroupItem value="seller_pays_all" data-testid="radio-seller-pays-all" className="mt-1" />
+                                      </FormControl>
+                                      <div className="flex-1">
+                                        <FormLabel className="font-semibold cursor-pointer">
+                                          Seller pays all shipping costs
+                                        </FormLabel>
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          This only applies to domestic orders. Buyers have to pay for shipping on international orders.
+                                        </p>
+                                      </div>
+                                    </div>
+                                  </FormItem>
+
+                                  {/* Buyer pays up to max */}
+                                  <FormItem className="flex flex-col space-y-2 rounded-lg border border-border p-3">
+                                    <div className="flex items-start space-x-3 space-y-0">
+                                      <FormControl>
+                                        <RadioGroupItem value="buyer_pays_up_to" data-testid="radio-buyer-pays-up-to" className="mt-1" />
+                                      </FormControl>
+                                      <div className="flex-1">
+                                        <FormLabel className="font-semibold cursor-pointer">
+                                          Buyer pays up to a set shipping cost
+                                        </FormLabel>
+                                        <p className="text-xs text-muted-foreground mt-1">
+                                          Set a maximum shipping cost buyers will pay for unlimited orders within your show.
+                                        </p>
+                                      </div>
+                                    </div>
+                                    {shippingCoverage === "buyer_pays_up_to" && (
+                                      <div className="ml-9 mt-2">
+                                        <FormField
+                                          control={form.control}
+                                          name="maxBuyerPays"
+                                          render={({ field }) => (
+                                            <FormItem>
+                                              <FormLabel className="text-sm">Amount</FormLabel>
+                                              <FormControl>
+                                                <Input
+                                                  type="number"
+                                                  step="0.01"
+                                                  placeholder="e.g., 9.21"
+                                                  {...field}
+                                                  data-testid="input-max-buyer-pays"
+                                                  className="max-w-[200px]"
+                                                />
+                                              </FormControl>
+                                              <FormMessage />
+                                            </FormItem>
+                                          )}
+                                        />
+                                      </div>
+                                    )}
+                                  </FormItem>
+
+                                  {/* Buyer pays all */}
+                                  <FormItem className="flex flex-col space-y-2 rounded-lg border border-border p-3">
+                                    <div className="flex items-start space-x-3 space-y-0">
+                                      <FormControl>
+                                        <RadioGroupItem value="buyer_pays_all" data-testid="radio-buyer-pays-all" className="mt-1" />
+                                      </FormControl>
+                                      <div className="flex-1">
+                                        <FormLabel className="font-semibold cursor-pointer">
+                                          Buyer pays all shipping costs
+                                        </FormLabel>
+                                      </div>
+                                    </div>
+                                  </FormItem>
+                                </RadioGroup>
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  </div>
+
+                  {/* Content Settings */}
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium">Content Settings</Label>
+                    <FormField
+                      control={form.control}
+                      name="roomType"
+                      render={({ field }) => (
+                        <FormItem className="space-y-2">
+                          <FormLabel className="text-sm">Room Type *</FormLabel>
+                          <FormControl>
+                            <RadioGroup
+                              onValueChange={field.onChange}
+                              value={field.value}
+                              className="flex flex-col space-y-2"
+                            >
+                              <FormItem className="flex items-center space-x-3 space-y-0">
+                                <FormControl>
+                                  <RadioGroupItem value="public" data-testid="radio-public" />
+                                </FormControl>
+                                <FormLabel className="font-normal cursor-pointer text-sm">
+                                  Public - Visible to everyone
+                                </FormLabel>
+                              </FormItem>
+                              <FormItem className="flex items-center space-x-3 space-y-0">
+                                <FormControl>
+                                  <RadioGroupItem value="private" data-testid="radio-private" />
+                                </FormControl>
+                                <FormLabel className="font-normal cursor-pointer text-sm">
+                                  Private - Share link only
+                                </FormLabel>
+                              </FormItem>
+                            </RadioGroup>
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="explicitContent"
+                      render={({ field }) => (
+                        <FormItem className="flex flex-row items-center justify-between rounded-lg border border-border p-3">
+                          <div className="space-y-0.5">
+                            <FormLabel className="text-sm">Explicit Content</FormLabel>
+                            <FormDescription className="text-xs">
+                              Enable this if your stream includes age-restricted (18+) or mature artwork, or if strong language will be used
+                            </FormDescription>
+                          </div>
+                          <FormControl>
+                            <Switch
+                              checked={field.value}
+                              onCheckedChange={field.onChange}
+                              data-testid="switch-explicit-content"
+                            />
+                          </FormControl>
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+
+                  {/* Repeat Settings */}
+                  <div className="space-y-3">
+                    <Label className="text-sm font-medium">Repeat Settings</Label>
+                    <FormField
+                      control={form.control}
+                      name="repeatShow"
+                      render={({ field }) => (
+                        <FormItem className="space-y-2">
+                          <FormLabel className="text-sm">Repeat Frequency *</FormLabel>
+                          <FormControl>
+                            <RadioGroup
+                              onValueChange={field.onChange}
+                              defaultValue={field.value}
+                              className="flex flex-col space-y-1"
+                            >
+                              <FormItem className="flex items-center space-x-3 space-y-0">
+                                <FormControl>
+                                  <RadioGroupItem value="none" data-testid="radio-none" />
+                                </FormControl>
+                                <FormLabel className="font-normal cursor-pointer text-sm">
+                                  No repeat (one-time show)
+                                </FormLabel>
+                              </FormItem>
+                              <FormItem className="flex items-center space-x-3 space-y-0">
+                                <FormControl>
+                                  <RadioGroupItem value="daily" data-testid="radio-daily" />
+                                </FormControl>
+                                <FormLabel className="font-normal cursor-pointer text-sm">
+                                  Daily
+                                </FormLabel>
+                              </FormItem>
+                              <FormItem className="flex items-center space-x-3 space-y-0">
+                                <FormControl>
+                                  <RadioGroupItem value="weekly" data-testid="radio-weekly" />
+                                </FormControl>
+                                <FormLabel className="font-normal cursor-pointer text-sm">
+                                  Weekly
+                                </FormLabel>
+                              </FormItem>
+                              <FormItem className="flex items-center space-x-3 space-y-0">
+                                <FormControl>
+                                  <RadioGroupItem value="monthly" data-testid="radio-monthly" />
+                                </FormControl>
+                                <FormLabel className="font-normal cursor-pointer text-sm">
+                                  Monthly
+                                </FormLabel>
+                              </FormItem>
+                            </RadioGroup>
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    {repeatShow !== "none" && (
+                      <FormField
+                        control={form.control}
+                        name="repeatCount"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel className="text-sm">Number of Occurrences</FormLabel>
+                            <FormControl>
+                              <Input
+                                type="number"
+                                min="1"
+                                placeholder="e.g., 5"
+                                {...field}
+                                data-testid="input-repeat-count"
+                                className="max-w-[200px]"
+                              />
+                            </FormControl>
+                            <FormDescription className="text-xs">
+                              Leave blank for unlimited
+                            </FormDescription>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Form Footer */}
+              <div className="flex flex-col sm:flex-row items-center gap-3 sm:justify-end pt-4 border-t border-border">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setLocation("/live-shows")}
+                  data-testid="button-cancel"
+                  disabled={uploadingImage || uploadingVideo}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={loadingShowData || uploadingImage || uploadingVideo}
+                  data-testid="button-submit"
+                >
+                  {(uploadingImage || uploadingVideo || loadingShowData) && (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  )}
+                  {uploadingImage || uploadingVideo 
+                    ? "Uploading..." 
+                    : isEditMode 
+                      ? "Update Show" 
+                      : loadingShowData 
+                        ? "Scheduling..." 
+                        : "Schedule Show"}
+                </Button>
+              </div>
+            </form>
+          </Form>
+        </div>
+      </div>
+    </div>
+  );
+}

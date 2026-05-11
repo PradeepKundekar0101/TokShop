@@ -1,0 +1,14 @@
+[
+    {
+        "relation": [
+            "delegate_permission/common.handle_all_urls"
+        ],
+        "target": {
+            "namespace": "android_app",
+            "package_name": "com.iconaapp.live",
+            "sha256_cert_fingerprints": [
+                "12:A4:90:7B:BD:93:47:B4:5A:8F:94:54:5F:97:3B:FE:39:7C:A1:24:DD:CB:C7:19:86:C2:7B:F4:8F:EF:E7:54"
+            ]
+        }
+    }
+]
